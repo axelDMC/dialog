@@ -288,25 +288,68 @@ function renderPrompter(text) {
   prompter.appendChild(frag);
 }
 
-// Avanza la posición de lectura buscando cada palabra reconocida en una
-// ventana corta hacia adelante (tolera palabras salteadas o mal reconocidas).
+// Avanza la posición de lectura con tres defensas contra adelantarse:
+// 1) descarta duplicados re-emitidos (Chrome en Android repite tramos),
+// 2) los saltos hacia adelante requieren confirmación (palabra larga o
+//    dos palabras seguidas que coincidan en secuencia),
+// 3) límite físico de velocidad (~240 palabras/min).
+let lastAdvanceTimes = [];
+let lastFedWords = [];
+
 function advanceFollower(words) {
+  // Deduplicación: si el tramo entrante repite la cola de lo ya procesado,
+  // se descarta ese prefijo.
+  let start = 0;
+  outer: for (let ov = Math.min(lastFedWords.length, words.length); ov > 0; ov--) {
+    for (let k = 0; k < ov; k++) {
+      if (lastFedWords[lastFedWords.length - ov + k] !== words[k]) continue outer;
+    }
+    start = ov;
+    break;
+  }
+  const fresh = words.slice(start).filter(Boolean);
+  if (!fresh.length) return;
+  lastFedWords = lastFedWords.concat(fresh).slice(-12);
+
   let moved = false;
-  for (const w of words) {
-    if (!w) continue;
-    const limit = Math.min(readPos + 8, followTokens.length);
-    for (let j = readPos; j < limit; j++) {
-      if (followTokens[j] === w) {
-        for (let k = readPos; k <= j; k++) prompterSpans[k].classList.add('read');
-        prompterSpans[j].classList.remove('current');
-        readPos = j + 1;
-        moved = true;
-        break;
+  for (let wi = 0; wi < fresh.length; wi++) {
+    if (readPos >= followTokens.length) break;
+    const w = fresh[wi];
+    // Caso normal: es exactamente la siguiente palabra del guion.
+    if (followTokens[readPos] === w) {
+      if (advanceTo(readPos + 1)) moved = true;
+      continue;
+    }
+    // Salto corto solo con confirmación.
+    const limit = Math.min(readPos + 6, followTokens.length);
+    for (let j = readPos + 1; j < limit; j++) {
+      if (followTokens[j] !== w) continue;
+      const isLong = w.length >= 5;
+      const next = fresh[wi + 1];
+      const bigramOk = next && j + 1 < followTokens.length && followTokens[j + 1] === next;
+      if (isLong || bigramOk) {
+        if (advanceTo(j + 1)) moved = true;
       }
+      break;
     }
   }
-  if (!moved) return;
-  markCurrentAndScroll();
+  if (moved) markCurrentAndScroll();
+}
+
+// Aplica el avance respetando el límite de velocidad de lectura humana.
+function advanceTo(target) {
+  const now = performance.now();
+  lastAdvanceTimes = lastAdvanceTimes.filter((t) => now - t < 2000);
+  const budget = 8 - lastAdvanceTimes.length; // máx 8 palabras por 2 s
+  if (budget <= 0) return false;
+  target = Math.min(target, readPos + budget, followTokens.length);
+  if (target <= readPos) return false;
+  for (let k = readPos; k < target; k++) {
+    prompterSpans[k].classList.add('read');
+    lastAdvanceTimes.push(now);
+  }
+  readPos = target;
+  return true;
 }
 
 function markCurrentAndScroll() {
@@ -338,6 +381,8 @@ function startRecording() {
   readPos = 0;
   lastFollowScroll = 0;
   wordFloat = 0;
+  lastAdvanceTimes = [];
+  lastFedWords = [];
   clearInterval(energyInterval);
   energyInterval = null;
   prompterSpans.forEach((s) => s.classList.remove('read', 'current'));
@@ -946,4 +991,5 @@ $('btn-hear').addEventListener('click', hearWord);
 $('btn-try').addEventListener('click', tryWord);
 
 speechWarningDefault = $('speech-warning').textContent;
+$('app-version').textContent = 'v8';
 loadNews();
