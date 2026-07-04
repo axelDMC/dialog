@@ -172,11 +172,15 @@ app.get('/api/article', rateLimit(30), async (req, res) => {
     if (!article || !article.textContent || article.textContent.trim().length < 200) {
       throw new Error('No se pudo extraer el texto del artículo');
     }
-    let text = article.textContent
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .join('\n\n');
+    let text = cleanArticle(article);
+    if (text.split(/\s+/).length < 80) {
+      // Limpieza demasiado agresiva para este medio: se usa el texto plano.
+      text = article.textContent
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .join('\n\n');
+    }
     const fullWords = text.split(/\s+/).length;
     text = trimToMaxWords(text, 420);
     const wordCount = text.split(/\s+/).length;
@@ -245,6 +249,41 @@ app.post('/api/translate', rateLimit(20), async (req, res) => {
     });
   }
 });
+
+// Limpieza del artículo extraído: Readability devuelve HTML que aún trae
+// pies de foto, créditos, titulares repetidos y bloques de "te puede
+// interesar". Se toman solo los párrafos reales, sin duplicados.
+const JUNK_RE = /^(foto:|fotos:|crédito|credito|imagen:|video:|vídeo:|lea también|lea tambien|le puede interesar|te puede interesar|también puedes|tambien puedes|leer más|leer mas|read more|related|más noticias|mas noticias|sign up|subscribe|newsletter|suscríbete|suscribete|síguenos|siguenos|comparte|escucha|descarga la app|únete|unete|últimas noticias|ultimas noticias)/i;
+const CREDIT_RE = /(crédito|credito|captura de pantalla|getty images|shutterstock|\(reuters\)|\(afp\)|\(efe\)|\(ap\)|\(bloomberg\)|cortesía|cortesia)/i;
+
+function cleanArticle(article) {
+  const dom = new JSDOM(`<body>${article.content || ''}</body>`);
+  const doc = dom.window.document;
+  for (const sel of ['figure', 'figcaption', 'aside', 'iframe', 'form', 'nav', 'footer', 'ul', 'ol', 'table']) {
+    doc.querySelectorAll(sel).forEach((n) => n.remove());
+  }
+  const paras = [...doc.querySelectorAll('p')]
+    .map((p) => p.textContent.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  dom.window.close();
+
+  const normKey = (s) =>
+    s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+  const titleKey = normKey(article.title || '');
+  const seen = new Set();
+  const out = [];
+  for (const p of paras) {
+    if (p.split(/\s+/).length < 5) continue;
+    if (JUNK_RE.test(p)) continue;
+    if (p.length < 220 && CREDIT_RE.test(p)) continue;
+    const key = normKey(p).slice(0, 90);
+    if (!key || seen.has(key)) continue;
+    if (titleKey.length >= 30 && key.startsWith(titleKey.slice(0, 60))) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out.join('\n\n');
+}
 
 // Corta el texto en un límite de oración sin pasarse de maxWords
 // (~3 minutos de lectura a 140 palabras por minuto).
