@@ -284,6 +284,10 @@ function advanceFollower(words) {
     }
   }
   if (!moved) return;
+  markCurrentAndScroll();
+}
+
+function markCurrentAndScroll() {
   const current = prompterSpans[Math.min(readPos, prompterSpans.length - 1)];
   prompterSpans.forEach((s) => s.classList.remove('current'));
   current.classList.add('current');
@@ -311,6 +315,9 @@ function startRecording() {
   lastSessionBlob = null;
   readPos = 0;
   lastFollowScroll = 0;
+  wordFloat = 0;
+  clearInterval(energyInterval);
+  energyInterval = null;
   prompterSpans.forEach((s) => s.classList.remove('read', 'current'));
   $('prompter').scrollTop = 0;
 
@@ -346,14 +353,21 @@ function fallbackToFixedScroll() {
   const px = Math.round((p.scrollHeight - p.clientHeight * 0.6) / estSec);
   $('scroll-speed').value = Math.min(80, Math.max(5, px));
   const warn = $('speech-warning');
-  warn.textContent = '⚠️ En este dispositivo el micrófono no se puede compartir entre la grabación y el reconocimiento de voz (limitación del navegador móvil). El texto avanzará a velocidad fija calibrada a tu guion — el video se graba normal, pero no habrá transcripción ni análisis de precisión.';
+  warn.textContent = '⚠️ El reconocimiento de voz no está respondiendo en este dispositivo. El texto avanzará a velocidad fija calibrada a tu guion; el video se graba normal, pero no habrá transcripción ni análisis de precisión.';
   warn.classList.remove('hidden');
 }
 
 function maybeGiveUpOnSpeech() {
   if (recogGivenUp || recogResultCount > 0) return;
   if (!recorder || recorder.state !== 'recording') return;
-  fallbackToFixedScroll();
+  // Si el micrófono sí detecta que hablas pero el reconocimiento no entrega
+  // nada, es el mic exclusivo del móvil: se sigue tu voz por actividad.
+  // Si ni siquiera hay energía de voz, se cae a velocidad fija.
+  if (hasSpokenOnce) {
+    switchToEnergyFollower();
+  } else {
+    fallbackToFixedScroll();
+  }
 }
 
 function startSpeechRecognition() {
@@ -368,7 +382,7 @@ function startSpeechRecognition() {
   recogErrorCount = 0;
   recogGivenUp = false;
   clearTimeout(recogWatchdog);
-  recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 9000);
+  recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 6000);
   recognition.onresult = (ev) => {
     recogResultCount++;
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -410,6 +424,11 @@ function startSpeechRecognition() {
   try { recognition.start(); } catch {}
 }
 
+// Estado de voz según la energía del micrófono (lo comparte el seguidor
+// por actividad y el detector de que el reconocimiento no escucha).
+let isSpeakingNow = false;
+let hasSpokenOnce = false;
+
 function startSilenceMonitor() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(mediaStream);
@@ -418,7 +437,8 @@ function startSilenceMonitor() {
   src.connect(analyser);
   const buf = new Float32Array(analyser.fftSize);
   let silenceStart = null;
-  let spokeOnce = false;
+  isSpeakingNow = false;
+  hasSpokenOnce = false;
   const int = setInterval(() => {
     analyser.getFloatTimeDomainData(buf);
     let sum = 0;
@@ -426,17 +446,46 @@ function startSilenceMonitor() {
     const rms = Math.sqrt(sum / buf.length);
     const now = performance.now() - recStartMs;
     if (rms < 0.012) {
+      isSpeakingNow = false;
       if (silenceStart === null) silenceStart = now;
     } else {
-      if (silenceStart !== null && spokeOnce) {
+      if (silenceStart !== null && hasSpokenOnce) {
         const dur = now - silenceStart;
         if (dur >= 1500) pauses.push({ startMs: Math.round(silenceStart), durMs: Math.round(dur) });
       }
       silenceStart = null;
-      spokeOnce = true;
+      isSpeakingNow = true;
+      hasSpokenOnce = true;
     }
   }, 100);
   silenceMonitor = { ctx, int };
+}
+
+// Seguidor por actividad de voz: cuando el equipo no permite reconocer
+// palabras mientras graba (micrófono exclusivo en móviles), el teleprompter
+// avanza a ritmo de lectura mientras detecta que estás hablando y se
+// detiene cuando haces pausa.
+let energyInterval = null;
+let wordFloat = 0;
+
+function switchToEnergyFollower() {
+  recogGivenUp = true;
+  if (recognition) { try { recognition.onend = null; recognition.stop(); } catch {} }
+  const warn = $('speech-warning');
+  warn.textContent = '🎤 Tu equipo no permite reconocer palabras mientras graba: el teleprompter seguirá tu voz por actividad (avanza mientras hablas, se detiene si pausas). El video se graba con sonido normal.';
+  warn.classList.remove('hidden');
+  wordFloat = readPos;
+  const wordsPerSec = 150 / 60; // ritmo medio de lectura
+  energyInterval = setInterval(() => {
+    if (!isSpeakingNow || !prompterSpans.length) return;
+    wordFloat = Math.min(wordFloat + wordsPerSec * 0.2, prompterSpans.length);
+    const target = Math.floor(wordFloat);
+    if (target > readPos) {
+      for (let k = readPos; k < target; k++) prompterSpans[k].classList.add('read');
+      readPos = target;
+      markCurrentAndScroll();
+    }
+  }, 200);
 }
 
 function startAutoScroll() {
@@ -467,6 +516,8 @@ function stopRecording() {
   // Nota: el reconocimiento de voz NO se detiene aquí; se detiene en
   // onRecordingStopped con un periodo de gracia para no perder la última frase.
   clearTimeout(recogWatchdog);
+  clearInterval(energyInterval);
+  energyInterval = null;
   if (silenceMonitor) {
     clearInterval(silenceMonitor.int);
     silenceMonitor.ctx.close().catch(() => {});
