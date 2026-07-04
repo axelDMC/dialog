@@ -510,6 +510,7 @@ function startAutoScroll() {
 
 function stopRecording() {
   if (recorder && recorder.state === 'recording') {
+    $('analyzing-detail').textContent = 'transcribiendo y comparando con el guion';
     $('analyzing').classList.remove('hidden');
     recorder.stop();
   }
@@ -558,6 +559,16 @@ async function onRecordingStopped() {
   const blob = new Blob(recordedChunks, { type: recorder.mimeType || 'video/webm' });
   lastSessionBlob = blob;
 
+  // Sin transcripción en vivo (mic exclusivo en móviles): se transcribe el
+  // audio grabado localmente con Whisper para recuperar el análisis completo.
+  if (!finalTranscript.trim() && hasSpokenOnce && blob.size > 1000) {
+    const text = await transcribeLocally(blob);
+    if (text) {
+      finalTranscript = text;
+      speechChunks = []; // sin marcas de tiempo: no hay ritmo por tramos
+    }
+  }
+
   const metrics = computeMetrics(currentScript.text, finalTranscript, durationMs, pauses, speechChunks);
   const session = {
     id: Date.now(),
@@ -579,6 +590,32 @@ async function onRecordingStopped() {
   $('analyzing').classList.add('hidden');
   renderResults(session);
   show('screen-results');
+}
+
+// Transcribe el audio grabado en el propio dispositivo (Whisper local).
+// El usuario puede saltarla si tarda demasiado.
+async function transcribeLocally(blob) {
+  const detail = $('analyzing-detail');
+  const skipBtn = $('btn-skip-analysis');
+  skipBtn.classList.remove('hidden');
+  let skipped = false;
+  const skip = new Promise((resolve) => {
+    skipBtn.onclick = () => { skipped = true; resolve(''); };
+  });
+  try {
+    const { transcribeBlob } = await import('./whisper.js');
+    const text = await Promise.race([
+      transcribeBlob(blob, currentScript.lang, (msg) => { detail.textContent = msg; }),
+      skip
+    ]);
+    return skipped ? '' : (text || '');
+  } catch (e) {
+    console.warn('Transcripción local no disponible', e);
+    return '';
+  } finally {
+    skipBtn.classList.add('hidden');
+    detail.textContent = 'comparando con el guion…';
+  }
 }
 
 // ---------- resultados ----------

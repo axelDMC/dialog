@@ -107,7 +107,11 @@
 
     <!-- Analizando -->
     <div id="analyzing" class="overlay hidden">
-      <div class="overlay-box">⏳ Analizando tu grabación…<br><span class="muted">transcribiendo y comparando con el guion</span></div>
+      <div class="overlay-box">
+        ⏳ Analizando tu grabación…<br>
+        <span class="muted" id="analyzing-detail">transcribiendo y comparando con el guion</span><br>
+        <button id="btn-skip-analysis" class="small hidden" style="margin-top:14px">Saltar transcripción (solo video y pausas)</button>
+      </div>
     </div>
 
     <!-- Paso 4: resultados -->
