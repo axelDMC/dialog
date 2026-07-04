@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Dialog — práctica de expresión oral</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎙️ Dialog</h1>
+    <nav>
+      <button id="nav-practice" class="nav-btn active">Practicar</button>
+      <button id="nav-history" class="nav-btn">Historial</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Paso 1: elegir contenido -->
+    <section id="screen-setup" class="screen">
+      <h2>1 · Elige qué vas a leer</h2>
+      <div class="setup-cols">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Noticias de hoy</h3>
+            <button id="btn-refresh-news" class="small">↻ Actualizar</button>
+          </div>
+          <div id="news-tabs">
+            <button class="tab active" data-cat="lima">🇵🇪 Lima &amp; Perú</button>
+            <button class="tab" data-cat="ai">🌐 IA global (EN)</button>
+          </div>
+          <div id="news-status" class="muted">Cargando noticias…</div>
+          <ul id="news-list"></ul>
+        </div>
+        <div class="panel">
+          <h3>O pega tu propio texto</h3>
+          <textarea id="paste-text" rows="10" placeholder="Pega aquí una noticia, un diálogo o cualquier texto que quieras practicar…"></textarea>
+          <button id="btn-use-pasted" class="primary">Usar este texto</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Paso 2: previsualizar / editar guion -->
+    <section id="screen-preview" class="screen hidden">
+      <h2>2 · Revisa tu guion</h2>
+      <div class="panel">
+        <input id="script-title" type="text" placeholder="Título de la práctica">
+        <div class="lang-row">
+          <div class="seg-control">
+            <button id="btn-lang-es">🇪🇸 Español</button>
+            <button id="btn-lang-en">🇺🇸 English</button>
+          </div>
+          <span class="muted">← toca para practicar este mismo texto en el otro idioma (se traduce solo)</span>
+        </div>
+        <div class="script-wrap">
+          <textarea id="script-text" rows="14"></textarea>
+          <div id="script-overlay" class="script-overlay hidden"><span class="spinner"></span> Traduciendo…</div>
+        </div>
+        <div id="script-stats" class="muted"></div>
+        <p class="muted">Meta: máximo 3 minutos ≈ 420 palabras.</p>
+        <div class="btn-row">
+          <button id="btn-back-setup">← Volver</button>
+          <button id="btn-trim">✂ Recortar a 3 min</button>
+          <button id="btn-start-practice" class="primary">Comenzar práctica →</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Paso 3: teleprompter + grabación -->
+    <section id="screen-practice" class="screen hidden">
+      <div class="practice-grid">
+        <div class="panel video-panel">
+          <video id="cam-preview" autoplay muted playsinline></video>
+          <div id="rec-indicator" class="hidden">● REC <span id="rec-timer">0:00</span></div>
+          <div class="btn-row">
+            <button id="btn-record" class="primary big">⏺ Iniciar grabación</button>
+            <button id="btn-stop" class="danger big hidden">⏹ Detener</button>
+            <button id="btn-cancel-practice">✕ Salir</button>
+          </div>
+          <div id="speech-warning" class="warn hidden">
+            ⚠️ Tu navegador no soporta reconocimiento de voz. Se grabará el video pero sin transcripción
+            (usa Chrome o Edge para el análisis completo).
+          </div>
+        </div>
+        <div class="panel prompter-panel">
+          <div class="prompter-controls">
+            <label>Idioma de voz
+              <select id="rec-lang">
+                <option value="es-419">Español</option>
+                <option value="en-US">English</option>
+              </select>
+            </label>
+            <label>Desplazamiento
+              <select id="scroll-mode">
+                <option value="voz" selected>Sigue mi voz</option>
+                <option value="fijo">Velocidad fija</option>
+                <option value="manual">Manual</option>
+              </select>
+            </label>
+            <label id="speed-label" class="hidden">Velocidad <input type="range" id="scroll-speed" min="5" max="80" value="25"></label>
+            <label>Letra <input type="range" id="font-size" min="18" max="44" value="28"></label>
+          </div>
+          <div id="prompter" class="prompter"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Analizando -->
+    <div id="analyzing" class="overlay hidden">
+      <div class="overlay-box">⏳ Analizando tu grabación…<br><span class="muted">transcribiendo y comparando con el guion</span></div>
+    </div>
+
+    <!-- Paso 4: resultados -->
+    <section id="screen-results" class="screen hidden">
+      <h2 id="results-title">Resultados</h2>
+      <div id="metrics-cards" class="cards"></div>
+      <div class="setup-cols">
+        <div class="panel">
+          <h3>Tu grabación</h3>
+          <video id="result-video" controls playsinline></video>
+        </div>
+        <div class="panel">
+          <h3>Guion vs. lo que dijiste</h3>
+          <p class="muted">
+            <span class="legend ok">■</span> leído &nbsp;
+            <span class="legend missed">■</span> omitido o trabado &nbsp;
+            <span class="legend filler">■</span> muletilla añadida
+          </p>
+          <div id="diff-view" class="diff"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>🗣️ Prueba de pronunciación</h3>
+        <p class="muted">Escribe una palabra (o toca una palabra roja del texto de arriba), escúchala con voz nativa y luego intenta decirla.</p>
+        <div class="drill-row">
+          <input type="text" id="drill-word" placeholder="p. ej. entrepreneurship">
+          <button id="btn-hear">🔊 Escuchar</button>
+          <button id="btn-try" class="primary">🎤 Intentar</button>
+        </div>
+        <div id="drill-result"></div>
+      </div>
+      <div class="btn-row">
+        <button id="btn-results-again" class="primary">🔁 Practicar de nuevo</button>
+        <button id="btn-results-home">Elegir otra noticia</button>
+      </div>
+    </section>
+
+    <!-- Historial -->
+    <section id="screen-history" class="screen hidden">
+      <h2>Tu progreso</h2>
+      <div class="panel">
+        <div id="trend-chart"></div>
+      </div>
+      <div id="history-list"></div>
+      <p id="history-empty" class="muted hidden">Aún no tienes sesiones guardadas. ¡Graba tu primera práctica!</p>
+    </section>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

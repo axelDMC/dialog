@@ -1,0 +1,19 @@
+{
+  "name": "dialog",
+  "version": "1.0.0",
+  "description": "Practica tu expresión oral: teleprompter, grabación y análisis de lectura de noticias",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.5.0",
+    "express": "^4.19.2",
+    "jsdom": "^24.1.0",
+    "rss-parser": "^3.13.0",
+    "selfsigned": "^2.4.1"
+  }
+}
