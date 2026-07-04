@@ -15,11 +15,14 @@ const CERT_DIR = path.join(__dirname, 'cert');
 
 const FEEDS = [
   // Lima & Perú — IA, tecnología, ecommerce, trading (español)
-  { source: 'IA en Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=%22inteligencia+artificial%22+(Lima+OR+Per%C3%BA)&format=RSS' },
-  { source: 'Tecnología Lima', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=tecnolog%C3%ADa+evento+(Lima+OR+Per%C3%BA)&format=RSS' },
-  { source: 'Ecommerce Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=ecommerce+comercio+electr%C3%B3nico+Per%C3%BA&format=RSS' },
-  { source: 'Trading Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=trading+inversiones+bolsa+Per%C3%BA&format=RSS' },
-  // IA global (inglés)
+  { source: 'IA en Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=%22inteligencia+artificial%22+(Lima+OR+Per%C3%BA)&format=RSS&mkt=es-MX' },
+  { source: 'Tecnología Lima', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=tecnolog%C3%ADa+evento+(Lima+OR+Per%C3%BA)&format=RSS&mkt=es-MX' },
+  { source: 'Ecommerce Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=ecommerce+comercio+electr%C3%B3nico+Per%C3%BA&format=RSS&mkt=es-MX' },
+  { source: 'Trading Perú', cat: 'lima', lang: 'es', url: 'https://www.bing.com/news/search?q=trading+inversiones+bolsa+Per%C3%BA&format=RSS&mkt=es-MX' },
+  // IA global (mezcla inglés + español; el RSS de Bing no soporta OR)
+  { source: 'IA en español', cat: 'ai', lang: 'es', url: 'https://www.bing.com/news/search?q=inteligencia+artificial&format=RSS&mkt=es-MX' },
+  { source: 'ChatGPT (ES)', cat: 'ai', lang: 'es', url: 'https://www.bing.com/news/search?q=ChatGPT&format=RSS&mkt=es-MX' },
+  { source: 'Claude (ES)', cat: 'ai', lang: 'es', url: 'https://www.bing.com/news/search?q=Claude+Anthropic+IA&format=RSS&mkt=es-MX' },
   { source: 'TechCrunch AI', cat: 'ai', lang: 'en', url: 'https://techcrunch.com/category/artificial-intelligence/feed/' },
   { source: 'The Verge AI', cat: 'ai', lang: 'en', url: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml' },
   { source: 'The Guardian AI', cat: 'ai', lang: 'en', url: 'https://www.theguardian.com/technology/artificialintelligenceai/rss' },
@@ -55,9 +58,31 @@ function rateLimit(maxPerMin) {
 // Solo se extraen artículos cuyos enlaces vinieron de los feeds de noticias.
 const knownLinks = new Set();
 
+// JSDOM es pesado en memoria: solo una extracción a la vez para no
+// reventar los 512 MB del plan gratuito de Render.
+let extractionQueue = Promise.resolve();
+function withExtractionLock(fn) {
+  const run = extractionQueue.then(fn, fn);
+  extractionQueue = run.catch(() => {});
+  return run;
+}
+
 const parser = new Parser({ timeout: 10000, headers: { 'User-Agent': USER_AGENT } });
 
 let newsCache = { at: 0, items: [] };
+
+// Los enlaces del RSS de Bing pasan por un redirector (apiclick) que trae
+// la URL real como parámetro: se resuelve directo, sin la redirección.
+function resolveBingLink(link) {
+  try {
+    const u = new URL(link);
+    if (u.hostname.endsWith('bing.com')) {
+      const target = u.searchParams.get('url');
+      if (target && /^https?:\/\//i.test(target)) return target;
+    }
+  } catch {}
+  return link;
+}
 
 async function fetchAllFeeds() {
   const results = await Promise.allSettled(
@@ -68,7 +93,7 @@ async function fetchAllFeeds() {
         cat: f.cat,
         lang: f.lang,
         title: (it.title || '').trim(),
-        link: it.link,
+        link: resolveBingLink(it.link),
         date: it.isoDate || it.pubDate || null,
         snippet: (it.contentSnippet || '').slice(0, 200)
       }));
@@ -79,6 +104,10 @@ async function fetchAllFeeds() {
     .filter((r) => r.status === 'fulfilled')
     .flatMap((r) => r.value)
     .filter((it) => it.title && it.link)
+    // MSN sirve páginas vacías renderizadas con JavaScript: no se pueden extraer.
+    .filter((it) => {
+      try { return !new URL(it.link).hostname.includes('msn.'); } catch { return false; }
+    })
     .filter((it) => {
       const key = it.title.toLowerCase().replace(/[^a-z0-9áéíóúñ]/g, '');
       if (seen.has(key)) return false;
@@ -129,10 +158,17 @@ app.get('/api/article', rateLimit(30), async (req, res) => {
     clearTimeout(timer);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const html = await resp.text();
-    const vc = new VirtualConsole();
-    vc.on('error', () => {});
-    const dom = new JSDOM(html, { url, virtualConsole: vc });
-    const article = new Readability(dom.window.document).parse();
+    if (html.length > 3_000_000) throw new Error('Página demasiado pesada para extraer');
+    const article = await withExtractionLock(() => {
+      const vc = new VirtualConsole();
+      vc.on('error', () => {});
+      const dom = new JSDOM(html, { url, virtualConsole: vc });
+      try {
+        return new Readability(dom.window.document).parse();
+      } finally {
+        dom.window.close();
+      }
+    });
     if (!article || !article.textContent || article.textContent.trim().length < 200) {
       throw new Error('No se pudo extraer el texto del artículo');
     }
