@@ -1,5 +1,8 @@
 import { computeMetrics, formatDuration, normalizeWord } from './analysis.js';
-import { saveSession, listSessions, getSession, deleteSession } from './storage.js';
+import {
+  saveSession, listSessions, getSession, deleteSession,
+  upsertWordMiss, recordWordAttempt, listWords, deleteWord
+} from './storage.js';
 import { preloadModel, startLiveRecognition } from './vosk-live.js';
 
 const $ = (id) => document.getElementById(id);
@@ -9,11 +12,12 @@ const $ = (id) => document.getElementById(id);
 // lee el audio del mismo stream de la grabación.
 const IS_MOBILE = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
 
-const screens = ['screen-setup', 'screen-preview', 'screen-practice', 'screen-results', 'screen-history'];
+const screens = ['screen-setup', 'screen-preview', 'screen-practice', 'screen-results', 'screen-history', 'screen-words'];
 function show(screenId) {
   for (const s of screens) $(s).classList.toggle('hidden', s !== screenId);
-  $('nav-practice').classList.toggle('active', screenId !== 'screen-history');
+  $('nav-practice').classList.toggle('active', !['screen-history', 'screen-words'].includes(screenId));
   $('nav-history').classList.toggle('active', screenId === 'screen-history');
+  $('nav-words').classList.toggle('active', screenId === 'screen-words');
 }
 
 // ---------- estado ----------
@@ -728,8 +732,27 @@ async function onRecordingStopped() {
   } catch (e) {
     console.warn('No se pudo guardar la sesión', e);
   }
+
+  // Las palabras que se trabaron van solas a la lista de práctica
+  // (solo si hubo transcripción real y la sesión no fue basura).
+  let addedCount = 0;
+  if (session.transcript && metrics.accuracy >= 30) {
+    const missed = metrics.diff.script
+      .filter((t) => !t.ok)
+      .map((t) => t.raw.replace(/[^\p{L}'-]/gu, ''))
+      .filter((w) => w.length >= 3);
+    const uniq = [...new Map(missed.map((w) => [normalizeWord(w), w])).entries()].slice(0, 20);
+    for (const [norm, raw] of uniq) {
+      try { await upsertWordMiss(session.lang, raw, norm); addedCount++; } catch {}
+    }
+  }
+
   $('analyzing').classList.add('hidden');
   renderResults(session);
+  if (addedCount) {
+    $('added-words').textContent = `➕ ${addedCount} palabra${addedCount > 1 ? 's' : ''} agregada${addedCount > 1 ? 's' : ''} a tu lista de práctica (pestaña Palabras).`;
+    $('added-words').classList.remove('hidden');
+  }
   show('screen-results');
 }
 
@@ -767,6 +790,7 @@ function metricCard(value, label, cls = '', hint = '') {
 function renderResults(session) {
   const m = session.metrics;
   currentScript = { title: session.title, text: session.script, source: session.source, lang: session.lang || detectLang(session.script) };
+  $('added-words').classList.add('hidden');
   $('results-title').textContent = session.title;
 
   const accCls = m.accuracy >= 90 ? 'good' : m.accuracy >= 75 ? 'mid' : 'bad';
@@ -837,59 +861,157 @@ function renderResults(session) {
 }
 
 // ---------- prueba de pronunciación ----------
-function drillLang() {
-  return (currentScript.lang || 'es') === 'en' ? 'en-US' : 'es-MX';
-}
-
-function hearWord() {
-  const w = $('drill-word').value.trim();
-  if (!w) return;
-  const u = new SpeechSynthesisUtterance(w);
-  u.lang = drillLang();
+function speakText(raw, langKey) {
+  const u = new SpeechSynthesisUtterance(raw);
+  u.lang = langKey === 'en' ? 'en-US' : 'es-MX';
   u.rate = 0.85;
   speechSynthesis.cancel();
   speechSynthesis.speak(u);
 }
 
-function tryWord() {
+// Escucha una palabra por el micrófono y devuelve {ok, heard} o null si
+// no se escuchó nada. Rechaza si el navegador no tiene reconocimiento.
+function listenForWord(raw, langKey) {
+  return new Promise((resolve, reject) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return reject(new Error('sin reconocimiento'));
+    const rec = new SR();
+    rec.lang = langKey === 'en' ? 'en-US' : 'es-MX';
+    rec.interimResults = false;
+    rec.maxAlternatives = 5;
+    let got = null;
+    rec.onresult = (ev) => {
+      const alts = Array.from(ev.results[0]).map((a) => a.transcript.trim());
+      const target = normalizeWord(raw);
+      const ok = alts.some((a) => a.split(/\s+/).some((x) => normalizeWord(x) === target));
+      got = { ok, heard: alts[0] || '' };
+    };
+    rec.onend = () => resolve(got);
+    rec.onerror = () => {};
+    rec.start();
+  });
+}
+
+function hearWord() {
+  const w = $('drill-word').value.trim();
+  if (w) speakText(w, currentScript.lang === 'en' ? 'en' : 'es');
+}
+
+async function tryWord() {
   const w = $('drill-word').value.trim();
   const out = $('drill-result');
   if (!w) return;
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
+  const langKey = currentScript.lang === 'en' ? 'en' : 'es';
+  out.innerHTML = '<span class="muted">🎤 Escuchando… di la palabra ahora</span>';
+  let r;
+  try {
+    r = await listenForWord(w, langKey);
+  } catch {
     out.textContent = 'El reconocimiento de voz no está disponible en este navegador (usa Chrome o Edge).';
     return;
   }
-  const rec = new SR();
-  rec.lang = drillLang();
-  rec.interimResults = false;
-  rec.maxAlternatives = 5;
-  let gotResult = false;
-  out.innerHTML = '<span class="muted">🎤 Escuchando… di la palabra ahora</span>';
-  rec.onresult = (ev) => {
-    gotResult = true;
-    const alts = Array.from(ev.results[0]).map((a) => a.transcript.trim());
-    const target = normalizeWord(w);
-    const ok = alts.some((a) => a.split(/\s+/).some((x) => normalizeWord(x) === target));
-    if (ok) {
-      out.innerHTML = `✅ <b style="color:var(--green)">¡Bien pronunciada!</b> Se entendió claramente «${w}».`;
-    } else {
-      out.innerHTML = `❌ <b style="color:var(--red)">Se escuchó «${alts[0] || '?'}»</b> en vez de «${w}». Escúchala de nuevo (🔊) e inténtalo otra vez.`;
-    }
-  };
-  rec.onend = () => {
-    if (!gotResult) out.innerHTML = '<span class="muted">No se escuchó nada. Intenta de nuevo más cerca del micrófono.</span>';
-  };
-  rec.onerror = () => {};
-  rec.start();
+  if (!r) {
+    out.innerHTML = '<span class="muted">No se escuchó nada. Intenta de nuevo más cerca del micrófono.</span>';
+    return;
+  }
+  try { await recordWordAttempt(langKey, w, normalizeWord(w), r.ok); } catch {}
+  if (r.ok) {
+    out.innerHTML = `✅ <b style="color:var(--green)">¡Bien pronunciada!</b> Se entendió claramente «${w}».`;
+  } else {
+    out.innerHTML = `❌ <b style="color:var(--red)">Se escuchó «${r.heard || '?'}»</b> en vez de «${w}». Escúchala de nuevo (🔊) e inténtalo otra vez.`;
+  }
+}
+
+// ---------- mis palabras difíciles ----------
+let wordsLang = 'en';
+
+function wordStatsText(w) {
+  return w.mastered ? '🏆 dominada' : `se trabó ${w.fails}× · racha ${w.streak}/3`;
+}
+
+function wordRow(w) {
+  const row = document.createElement('div');
+  row.className = 'word-row' + (w.mastered ? ' mastered' : '');
+  row.innerHTML = `
+    <div class="word-main"><b class="word-text"></b><span class="word-stats muted"></span></div>
+    <div class="word-actions">
+      <button class="small btn-hear-w" title="Escuchar">🔊</button>
+      <button class="small primary btn-try-w" title="Intentar">🎤</button>
+      <button class="small btn-del-w" title="Quitar">🗑</button>
+    </div>
+    <div class="word-result"></div>`;
+  row.querySelector('.word-text').textContent = w.raw;
+  row.querySelector('.word-stats').textContent = wordStatsText(w);
+  const res = row.querySelector('.word-result');
+  row.querySelector('.btn-hear-w').addEventListener('click', () => speakText(w.raw, w.lang));
+  row.querySelector('.btn-try-w').addEventListener('click', async () => {
+    res.textContent = '🎤 escuchando… dila ahora';
+    let r;
+    try { r = await listenForWord(w.raw, w.lang); } catch { res.textContent = 'Reconocimiento no disponible en este navegador.'; return; }
+    if (!r) { res.textContent = 'No se escuchó nada, intenta de nuevo.'; return; }
+    try {
+      const updated = await recordWordAttempt(w.lang, w.raw, normalizeWord(w.raw), r.ok);
+      Object.assign(w, updated);
+    } catch {}
+    row.querySelector('.word-stats').textContent = wordStatsText(w);
+    row.classList.toggle('mastered', w.mastered);
+    res.innerHTML = r.ok
+      ? (w.mastered ? '✅ ¡Perfecto! 🏆 <b style="color:var(--green)">Palabra dominada</b>' : `✅ ¡Bien! Racha <b>${w.streak}/3</b>`)
+      : `❌ Se escuchó «${r.heard || '?'}» — óyela con 🔊 e intenta otra vez`;
+  });
+  row.querySelector('.btn-del-w').addEventListener('click', async () => {
+    await deleteWord(w.key);
+    renderWordsScreen();
+  });
+  return row;
+}
+
+async function renderWordsScreen() {
+  const all = await listWords();
+  const words = all
+    .filter((w) => w.lang === wordsLang)
+    .sort((a, b) => (a.mastered - b.mastered) || (b.fails - a.fails));
+  const list = $('words-list');
+  list.innerHTML = '';
+  $('words-empty').classList.toggle('hidden', words.length > 0);
+  for (const w of words) list.appendChild(wordRow(w));
 }
 
 // ---------- historial ----------
+let historyLang = 'all';
+
+function renderHistorySummary(sessions) {
+  const el = $('history-summary');
+  if (!sessions.length) { el.innerHTML = ''; return; }
+  const days = new Set(sessions.map((s) => new Date(s.createdAt).toDateString()));
+  let streak = 0;
+  const cur = new Date();
+  if (!days.has(cur.toDateString())) cur.setDate(cur.getDate() - 1);
+  while (days.has(cur.toDateString())) {
+    streak++;
+    cur.setDate(cur.getDate() - 1);
+  }
+  const totalMin = Math.round(sessions.reduce((sum, s) => sum + s.metrics.durationMs, 0) / 60000);
+  const last5 = sessions.filter((s) => s.transcript).slice(0, 5);
+  const avgAcc = last5.length
+    ? Math.round(last5.reduce((sum, s) => sum + s.metrics.accuracy, 0) / last5.length)
+    : null;
+  el.innerHTML =
+    metricCard(streak, 'días seguidos 🔥') +
+    metricCard(sessions.length, 'sesiones') +
+    metricCard(totalMin + ' min', 'tiempo practicado') +
+    (avgAcc !== null
+      ? metricCard(avgAcc + '%', 'precisión (últimas 5)', avgAcc >= 85 ? 'good' : avgAcc >= 70 ? 'mid' : 'bad')
+      : '');
+}
+
 async function renderHistory() {
-  const sessions = await listSessions();
+  const all = (await listSessions()).map((s) => ({ ...s, lang: s.lang || 'es' }));
+  const sessions = historyLang === 'all' ? all : all.filter((s) => s.lang === historyLang);
   const list = $('history-list');
   list.innerHTML = '';
   $('history-empty').classList.toggle('hidden', sessions.length > 0);
+  renderHistorySummary(sessions);
   renderTrend(sessions.slice().reverse());
   for (const s of sessions) {
     const row = document.createElement('div');
@@ -898,7 +1020,7 @@ async function renderHistory() {
     row.innerHTML = `
       <div class="session-info">
         <div class="session-title"></div>
-        <div class="session-meta">${date} · ${s.source} · ${formatDuration(s.metrics.durationMs)}</div>
+        <div class="session-meta"><span class="badge ${s.lang}">${s.lang.toUpperCase()}</span> ${date} · ${s.source} · ${formatDuration(s.metrics.durationMs)}</div>
       </div>
       <div class="session-stats">
         <span><b>${s.metrics.accuracy}%</b>precisión</span>
@@ -948,6 +1070,29 @@ function renderTrend(sessions) {
 // ---------- eventos ----------
 $('nav-practice').addEventListener('click', () => show('screen-setup'));
 $('nav-history').addEventListener('click', () => { renderHistory(); show('screen-history'); });
+$('nav-words').addEventListener('click', () => { renderWordsScreen(); show('screen-words'); });
+document.querySelectorAll('#history-filter .chip').forEach((c) => {
+  c.addEventListener('click', () => {
+    historyLang = c.dataset.lang;
+    document.querySelectorAll('#history-filter .chip').forEach((x) => x.classList.toggle('active', x === c));
+    renderHistory();
+  });
+});
+document.querySelectorAll('#words-filter .chip').forEach((c) => {
+  c.addEventListener('click', () => {
+    wordsLang = c.dataset.lang;
+    document.querySelectorAll('#words-filter .chip').forEach((x) => x.classList.toggle('active', x === c));
+    renderWordsScreen();
+  });
+});
+$('btn-add-word').addEventListener('click', async () => {
+  const clean = ($('new-word').value.trim().split(/\s+/)[0] || '').replace(/[^\p{L}'-]/gu, '');
+  if (clean.length < 2) return;
+  await upsertWordMiss(wordsLang, clean, normalizeWord(clean));
+  $('new-word').value = '';
+  renderWordsScreen();
+});
+$('new-word').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btn-add-word').click(); });
 $('btn-refresh-news').addEventListener('click', () => loadNews(true));
 $('btn-use-pasted').addEventListener('click', () => {
   const text = $('paste-text').value.trim();
@@ -991,5 +1136,5 @@ $('btn-hear').addEventListener('click', hearWord);
 $('btn-try').addEventListener('click', tryWord);
 
 speechWarningDefault = $('speech-warning').textContent;
-$('app-version').textContent = 'v8';
+$('app-version').textContent = 'v9';
 loadNews();

@@ -11,6 +11,7 @@
     <h1>🎙️ Dialog <span id="app-version" class="muted" style="font-size:11px"></span></h1>
     <nav>
       <button id="nav-practice" class="nav-btn active">Practicar</button>
+      <button id="nav-words" class="nav-btn">Palabras</button>
       <button id="nav-history" class="nav-btn">Historial</button>
     </nav>
   </header>
@@ -119,6 +120,7 @@
     <!-- Paso 4: resultados -->
     <section id="screen-results" class="screen hidden">
       <h2 id="results-title">Resultados</h2>
+      <p id="added-words" class="muted hidden"></p>
       <div id="metrics-cards" class="cards"></div>
       <div class="setup-cols">
         <div class="panel">
@@ -151,9 +153,33 @@
       </div>
     </section>
 
+    <!-- Palabras difíciles -->
+    <section id="screen-words" class="screen hidden">
+      <h2>🗣️ Mis palabras difíciles</h2>
+      <p class="muted">Las palabras que se te traban en tus lecturas llegan aquí solas. Escúchalas (🔊), repítelas (🎤) y domínalas: <b>3 aciertos seguidos = dominada 🏆</b>.</p>
+      <div class="panel">
+        <div id="words-filter" class="chips">
+          <button class="chip active" data-lang="en">🇺🇸 English</button>
+          <button class="chip" data-lang="es">🇪🇸 Español</button>
+        </div>
+        <div class="drill-row" style="margin-top:12px">
+          <input type="text" id="new-word" placeholder="agrega una palabra que quieras dominar…">
+          <button id="btn-add-word">+ Agregar</button>
+        </div>
+      </div>
+      <div id="words-list"></div>
+      <p id="words-empty" class="muted hidden">Aún no hay palabras en este idioma. Practica una lectura y las que se te traben aparecerán solas.</p>
+    </section>
+
     <!-- Historial -->
     <section id="screen-history" class="screen hidden">
       <h2>Tu progreso</h2>
+      <div id="history-filter" class="chips">
+        <button class="chip active" data-lang="all">Todo</button>
+        <button class="chip" data-lang="en">🇺🇸 English</button>
+        <button class="chip" data-lang="es">🇪🇸 Español</button>
+      </div>
+      <div id="history-summary" class="cards"></div>
       <div class="panel">
         <div id="trend-chart"></div>
       </div>
@@ -162,6 +188,6 @@
     </section>
   </main>
 
-  <script type="module" src="js/app.js?v=8"></script>
+  <script type="module" src="js/app.js?v=9"></script>
 </body>
 </html>
