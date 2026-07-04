@@ -41,6 +41,7 @@ let speechAvailable = false;
 let useVoskLive = false;
 let voskSession = null;
 let discardRecording = false;
+let hadAudioTrack = true;
 
 // Detección de micrófono ocupado: en móviles el reconocimiento de voz no
 // puede escuchar mientras se graba video (el mic es exclusivo).
@@ -231,32 +232,34 @@ async function startPractice() {
   renderPrompter(currentScript.text);
   $('prompter').scrollTop = 0;
   show('screen-practice');
+  speechAvailable = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
+  useVoskLive = !speechAvailable;
+  // En el celular el micrófono es exclusivo: se dedica al reconocimiento
+  // (prioridad: que siga tu voz) y el video se graba sin audio.
+  const muteVideo = IS_MOBILE && speechAvailable;
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: { echoCancellation: true, noiseSuppression: true }
+      audio: muteVideo ? false : { echoCancellation: true, noiseSuppression: true }
     });
     $('cam-preview').srcObject = mediaStream;
+    $('mobile-note').classList.toggle('hidden', !muteVideo);
   } catch (e) {
     alert('No se pudo acceder a la cámara/micrófono: ' + e.message +
       '\n\nSi entras desde el celular usa la dirección https:// y acepta el certificado.');
     show('screen-preview');
     return;
   }
-  speechAvailable = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
-  useVoskLive = IS_MOBILE || !speechAvailable;
   $('speech-warning').textContent = speechWarningDefault;
   $('speech-warning').classList.add('hidden');
   if (useVoskLive) {
-    // Precarga el modelo mientras el usuario se acomoda: al grabar ya está listo.
+    // Sin Web Speech: se precarga el modelo Vosk mientras el usuario se acomoda.
     const langKey = $('rec-lang').value.startsWith('en') ? 'en' : 'es';
     preloadModel(langKey, (msg) => { $('recog-status').textContent = msg; })
       .catch(() => {
         $('recog-status').textContent = '';
-        if (!speechAvailable) $('speech-warning').classList.remove('hidden');
+        $('speech-warning').classList.remove('hidden');
       });
-  } else if (!speechAvailable) {
-    $('speech-warning').classList.remove('hidden');
   }
   updateScrollControls();
 }
@@ -350,12 +353,17 @@ function startRecording() {
   recogResultCount = 0;
   recogErrorCount = 0;
   recogGivenUp = false;
-  if (useVoskLive) {
+  hadAudioTrack = mediaStream.getAudioTracks().length > 0;
+  if (useVoskLive && hadAudioTrack) {
     startVoskRecognition();
   } else {
     startSpeechRecognition();
   }
-  startSilenceMonitor();
+  if (hadAudioTrack) {
+    startSilenceMonitor();
+  } else {
+    startRecogPauseMonitor();
+  }
   startAutoScroll();
 
   $('btn-record').classList.add('hidden');
@@ -443,6 +451,8 @@ function startSpeechRecognition() {
   recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 6000);
   recognition.onresult = (ev) => {
     recogResultCount++;
+    lastSpeechAt = performance.now();
+    hasSpokenOnce = true;
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const text = ev.results[i][0].transcript.trim();
       if (!text) continue;
@@ -519,6 +529,29 @@ function startSilenceMonitor() {
   silenceMonitor = { ctx, int };
 }
 
+// Sin pista de audio en la grabación (celular), las pausas se estiman por
+// los huecos entre resultados del reconocimiento de voz.
+let gapInterval = null;
+let lastSpeechAt = 0;
+
+function startRecogPauseMonitor() {
+  lastSpeechAt = 0;
+  let pauseStart = null;
+  gapInterval = setInterval(() => {
+    if (!lastSpeechAt) return; // aún no dice la primera palabra
+    const silent = performance.now() - lastSpeechAt > 1500;
+    if (silent && pauseStart === null) {
+      pauseStart = lastSpeechAt;
+    } else if (!silent && pauseStart !== null) {
+      pauses.push({
+        startMs: Math.round(pauseStart - recStartMs),
+        durMs: Math.round(lastSpeechAt - pauseStart)
+      });
+      pauseStart = null;
+    }
+  }, 250);
+}
+
 // Seguidor por actividad de voz: cuando el equipo no permite reconocer
 // palabras mientras graba (micrófono exclusivo en móviles), el teleprompter
 // avanza a ritmo de lectura mientras detecta que estás hablando y se
@@ -577,6 +610,8 @@ function stopRecording() {
   clearTimeout(recogWatchdog);
   clearInterval(energyInterval);
   energyInterval = null;
+  clearInterval(gapInterval);
+  gapInterval = null;
   if (silenceMonitor) {
     clearInterval(silenceMonitor.int);
     silenceMonitor.ctx.close().catch(() => {});
@@ -620,9 +655,9 @@ async function onRecordingStopped() {
   const blob = new Blob(recordedChunks, { type: recorder.mimeType || 'video/webm' });
   lastSessionBlob = blob;
 
-  // Sin transcripción en vivo (mic exclusivo en móviles): se transcribe el
-  // audio grabado localmente con Whisper para recuperar el análisis completo.
-  if (!finalTranscript.trim() && hasSpokenOnce && blob.size > 1000) {
+  // Sin transcripción en vivo pero con audio grabado: se transcribe
+  // localmente con Whisper para recuperar el análisis completo.
+  if (!finalTranscript.trim() && hadAudioTrack && hasSpokenOnce && blob.size > 1000) {
     const text = await transcribeLocally(blob);
     if (text) {
       finalTranscript = text;
