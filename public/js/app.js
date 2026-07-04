@@ -1,7 +1,13 @@
 import { computeMetrics, formatDuration, normalizeWord } from './analysis.js';
 import { saveSession, listSessions, getSession, deleteSession } from './storage.js';
+import { preloadModel, startLiveRecognition } from './vosk-live.js';
 
 const $ = (id) => document.getElementById(id);
+
+// En móviles Web Speech no puede escuchar mientras se graba (micrófono
+// exclusivo): ahí el reconocimiento en vivo corre con Vosk (WASM), que
+// lee el audio del mismo stream de la grabación.
+const IS_MOBILE = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
 
 const screens = ['screen-setup', 'screen-preview', 'screen-practice', 'screen-results', 'screen-history'];
 function show(screenId) {
@@ -32,6 +38,8 @@ let readPos = 0;
 let fedCounts = {};
 let lastFollowScroll = 0;
 let speechAvailable = false;
+let useVoskLive = false;
+let voskSession = null;
 let discardRecording = false;
 
 // Detección de micrófono ocupado: en móviles el reconocimiento de voz no
@@ -236,9 +244,20 @@ async function startPractice() {
     return;
   }
   speechAvailable = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
+  useVoskLive = IS_MOBILE || !speechAvailable;
   $('speech-warning').textContent = speechWarningDefault;
-  $('speech-warning').classList.toggle('hidden', speechAvailable);
-  if (!speechAvailable && $('scroll-mode').value === 'voz') $('scroll-mode').value = 'fijo';
+  $('speech-warning').classList.add('hidden');
+  if (useVoskLive) {
+    // Precarga el modelo mientras el usuario se acomoda: al grabar ya está listo.
+    const langKey = $('rec-lang').value.startsWith('en') ? 'en' : 'es';
+    preloadModel(langKey, (msg) => { $('recog-status').textContent = msg; })
+      .catch(() => {
+        $('recog-status').textContent = '';
+        if (!speechAvailable) $('speech-warning').classList.remove('hidden');
+      });
+  } else if (!speechAvailable) {
+    $('speech-warning').classList.remove('hidden');
+  }
   updateScrollControls();
 }
 
@@ -328,7 +347,14 @@ function startRecording() {
   recorder.start(1000);
   recStartMs = performance.now();
 
-  startSpeechRecognition();
+  recogResultCount = 0;
+  recogErrorCount = 0;
+  recogGivenUp = false;
+  if (useVoskLive) {
+    startVoskRecognition();
+  } else {
+    startSpeechRecognition();
+  }
   startSilenceMonitor();
   startAutoScroll();
 
@@ -370,6 +396,41 @@ function maybeGiveUpOnSpeech() {
   }
 }
 
+// Reconocimiento en vivo con Vosk sobre el stream de la grabación
+// (móviles y navegadores sin Web Speech).
+function startVoskRecognition() {
+  clearTimeout(recogWatchdog);
+  recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 15000);
+  const langKey = $('rec-lang').value.startsWith('en') ? 'en' : 'es';
+  startLiveRecognition({
+    stream: mediaStream,
+    lang: langKey,
+    onStatus: (msg) => { $('recog-status').textContent = msg || ''; },
+    onPartialWords: (words) => {
+      recogResultCount++;
+      // Si ya se cayó al seguidor por actividad, no se compite con él.
+      if (!recogGivenUp) advanceFollower(words.map(normalizeWord));
+    },
+    onFinal: (text) => {
+      recogResultCount++;
+      finalTranscript += ' ' + text;
+      speechChunks.push({
+        tMs: performance.now() - recStartMs,
+        words: text.split(/\s+/).length
+      });
+    }
+  })
+    .then((session) => {
+      voskSession = session;
+      // Si la práctica ya terminó mientras el modelo cargaba, se cierra.
+      if (!recorder || recorder.state !== 'recording') session.stop();
+    })
+    .catch(() => {
+      $('recog-status').textContent = '';
+      maybeGiveUpOnSpeech();
+    });
+}
+
 function startSpeechRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) return;
@@ -378,9 +439,6 @@ function startSpeechRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   fedCounts = {};
-  recogResultCount = 0;
-  recogErrorCount = 0;
-  recogGivenUp = false;
   clearTimeout(recogWatchdog);
   recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 6000);
   recognition.onresult = (ev) => {
@@ -543,11 +601,14 @@ async function onRecordingStopped() {
 
   // Periodo de gracia: el reconocimiento entrega la última frase con
   // ~1s de retraso; sin esta espera el final de la lectura se perdía.
-  if (recognition) {
-    try { recognition.onend = null; recognition.stop(); } catch {}
+  if (recognition || voskSession) {
+    if (recognition) { try { recognition.onend = null; recognition.stop(); } catch {} }
+    if (voskSession) { try { voskSession.stop(); } catch {} }
     await new Promise((r) => setTimeout(r, 1500));
     recognition = null;
+    voskSession = null;
   }
+  $('recog-status').textContent = '';
   stopCamera();
 
   if (discardRecording) {
