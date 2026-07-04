@@ -34,6 +34,14 @@ let lastFollowScroll = 0;
 let speechAvailable = false;
 let discardRecording = false;
 
+// Detección de micrófono ocupado: en móviles el reconocimiento de voz no
+// puede escuchar mientras se graba video (el mic es exclusivo).
+let recogResultCount = 0;
+let recogErrorCount = 0;
+let recogGivenUp = false;
+let recogWatchdog = null;
+let speechWarningDefault = ''; // se captura del HTML al cargar
+
 // ---------- noticias ----------
 let newsItems = [];
 let currentCat = 'lima';
@@ -228,6 +236,7 @@ async function startPractice() {
     return;
   }
   speechAvailable = 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
+  $('speech-warning').textContent = speechWarningDefault;
   $('speech-warning').classList.toggle('hidden', speechAvailable);
   if (!speechAvailable && $('scroll-mode').value === 'voz') $('scroll-mode').value = 'fijo';
   updateScrollControls();
@@ -324,6 +333,29 @@ function startRecording() {
   }, 500);
 }
 
+// En móviles la grabadora de video acapara el micrófono y el reconocimiento
+// no recibe audio: si en unos segundos no hay ni un resultado (o hay errores
+// de captura), se pasa a scroll de velocidad fija calibrada al guion.
+function fallbackToFixedScroll() {
+  recogGivenUp = true;
+  if ($('scroll-mode').value !== 'voz') return;
+  $('scroll-mode').value = 'fijo';
+  updateScrollControls();
+  const p = $('prompter');
+  const estSec = Math.max((followTokens.length / 140) * 60, 30);
+  const px = Math.round((p.scrollHeight - p.clientHeight * 0.6) / estSec);
+  $('scroll-speed').value = Math.min(80, Math.max(5, px));
+  const warn = $('speech-warning');
+  warn.textContent = '⚠️ En este dispositivo el micrófono no se puede compartir entre la grabación y el reconocimiento de voz (limitación del navegador móvil). El texto avanzará a velocidad fija calibrada a tu guion — el video se graba normal, pero no habrá transcripción ni análisis de precisión.';
+  warn.classList.remove('hidden');
+}
+
+function maybeGiveUpOnSpeech() {
+  if (recogGivenUp || recogResultCount > 0) return;
+  if (!recorder || recorder.state !== 'recording') return;
+  fallbackToFixedScroll();
+}
+
 function startSpeechRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) return;
@@ -332,7 +364,13 @@ function startSpeechRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   fedCounts = {};
+  recogResultCount = 0;
+  recogErrorCount = 0;
+  recogGivenUp = false;
+  clearTimeout(recogWatchdog);
+  recogWatchdog = setTimeout(maybeGiveUpOnSpeech, 9000);
   recognition.onresult = (ev) => {
+    recogResultCount++;
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const text = ev.results[i][0].transcript.trim();
       if (!text) continue;
@@ -353,14 +391,22 @@ function startSpeechRecognition() {
       }
     }
   };
-  // Chrome corta el reconocimiento cada cierto tiempo: se reinicia solo.
+  // Chrome corta el reconocimiento cada cierto tiempo: se reinicia solo
+  // (salvo que ya nos hayamos rendido por micrófono ocupado).
   recognition.onend = () => {
-    if (recorder && recorder.state === 'recording') {
+    if (!recogGivenUp && recorder && recorder.state === 'recording') {
       fedCounts = {};
       try { recognition.start(); } catch {}
     }
   };
-  recognition.onerror = () => {};
+  recognition.onerror = (ev) => {
+    if (['audio-capture', 'not-allowed', 'service-not-allowed'].includes(ev.error)) {
+      recogErrorCount += 2;
+    } else {
+      recogErrorCount++;
+    }
+    if (recogErrorCount >= 2) maybeGiveUpOnSpeech();
+  };
   try { recognition.start(); } catch {}
 }
 
@@ -420,6 +466,7 @@ function stopRecording() {
   }
   // Nota: el reconocimiento de voz NO se detiene aquí; se detiene en
   // onRecordingStopped con un periodo de gracia para no perder la última frase.
+  clearTimeout(recogWatchdog);
   if (silenceMonitor) {
     clearInterval(silenceMonitor.int);
     silenceMonitor.ctx.close().catch(() => {});
@@ -714,4 +761,5 @@ $('scroll-mode').addEventListener('change', updateScrollControls);
 $('btn-hear').addEventListener('click', hearWord);
 $('btn-try').addEventListener('click', tryWord);
 
+speechWarningDefault = $('speech-warning').textContent;
 loadNews();
