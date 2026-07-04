@@ -340,6 +340,9 @@ textarea, input[type="text"] {
 .word-main { display: flex; flex-direction: column; gap: 2px; }
 .word-text { font-size: 17px; }
 .word-stats { font-size: 12px; }
+.word-ipa { font-size: 13px; color: var(--accent); }
+#drill-ipa { margin-top: 10px; font-size: 14px; }
+#drill-ipa:empty { display: none; }
 .word-actions { display: flex; gap: 6px; }
 .word-result { grid-column: 1 / -1; font-size: 13px; }
 .word-result:empty { display: none; }

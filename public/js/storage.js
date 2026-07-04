@@ -115,6 +115,15 @@ export async function recordWordAttempt(lang, raw, norm, ok) {
   return putWord(db, w);
 }
 
+// Guarda datos de pronunciación (IPA, audio) en una palabra existente.
+export async function saveWordInfo(key, info) {
+  const db = await openDb();
+  const w = await getWordTx(db, key);
+  if (!w) return null;
+  Object.assign(w, info);
+  return putWord(db, w);
+}
+
 export async function listWords() {
   const db = await openDb();
   return new Promise((resolve, reject) => {

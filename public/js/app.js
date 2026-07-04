@@ -1,9 +1,10 @@
 import { computeMetrics, formatDuration, normalizeWord } from './analysis.js';
 import {
   saveSession, listSessions, getSession, deleteSession,
-  upsertWordMiss, recordWordAttempt, listWords, deleteWord
+  upsertWordMiss, recordWordAttempt, listWords, deleteWord, saveWordInfo
 } from './storage.js';
 import { preloadModel, startLiveRecognition } from './vosk-live.js';
+import { guideEs, guideEn } from './pronounce.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -837,9 +838,11 @@ function renderResults(session) {
     if (!tok.ok) {
       span.title = 'Toca para probar la pronunciación de esta palabra';
       span.addEventListener('click', () => {
-        $('drill-word').value = tok.raw.replace(/[^\p{L}\p{N}'-]/gu, '');
+        const word = tok.raw.replace(/[^\p{L}\p{N}'-]/gu, '');
+        $('drill-word').value = word;
         $('drill-word').scrollIntoView({ block: 'center', behavior: 'smooth' });
         $('drill-result').innerHTML = '';
+        showDrillGuide(word, currentScript.lang === 'en' ? 'en' : 'es');
       });
     }
     frag.appendChild(span);
@@ -892,9 +895,30 @@ function listenForWord(raw, langKey) {
   });
 }
 
-function hearWord() {
+// Muestra la guía de pronunciación de la palabra del drill (IPA en inglés,
+// sílabas RAE en español) y devuelve el audio de diccionario si existe.
+async function showDrillGuide(w, langKey) {
+  const el = $('drill-ipa');
+  if (langKey === 'es') {
+    el.textContent = '📖 ' + guideEs(w) + '  (sílaba fuerte en mayúsculas, reglas RAE)';
+    return '';
+  }
+  el.textContent = '📖 buscando en el diccionario…';
+  const info = await guideEn(w);
+  el.textContent = info.ipa ? `📖 ${info.ipa}` + (info.audioUrl ? '  ·  audio real de diccionario' : '') : '';
+  return info.audioUrl || '';
+}
+
+async function hearWord() {
   const w = $('drill-word').value.trim();
-  if (w) speakText(w, currentScript.lang === 'en' ? 'en' : 'es');
+  if (!w) return;
+  const langKey = currentScript.lang === 'en' ? 'en' : 'es';
+  const audioUrl = await showDrillGuide(w, langKey);
+  if (audioUrl) {
+    new Audio(audioUrl).play().catch(() => speakText(w, langKey));
+  } else {
+    speakText(w, langKey);
+  }
 }
 
 async function tryWord() {
@@ -902,6 +926,7 @@ async function tryWord() {
   const out = $('drill-result');
   if (!w) return;
   const langKey = currentScript.lang === 'en' ? 'en' : 'es';
+  showDrillGuide(w, langKey);
   out.innerHTML = '<span class="muted">🎤 Escuchando… di la palabra ahora</span>';
   let r;
   try {
@@ -933,7 +958,7 @@ function wordRow(w) {
   const row = document.createElement('div');
   row.className = 'word-row' + (w.mastered ? ' mastered' : '');
   row.innerHTML = `
-    <div class="word-main"><b class="word-text"></b><span class="word-stats muted"></span></div>
+    <div class="word-main"><b class="word-text"></b><span class="word-ipa muted"></span><span class="word-stats muted"></span></div>
     <div class="word-actions">
       <button class="small btn-hear-w" title="Escuchar">🔊</button>
       <button class="small primary btn-try-w" title="Intentar">🎤</button>
@@ -942,8 +967,23 @@ function wordRow(w) {
     <div class="word-result"></div>`;
   row.querySelector('.word-text').textContent = w.raw;
   row.querySelector('.word-stats').textContent = wordStatsText(w);
+  const ipaEl = row.querySelector('.word-ipa');
+  if (w.lang === 'es') {
+    ipaEl.textContent = guideEs(w.raw) + '  (sílaba fuerte en mayúsculas)';
+  } else if (w.ipa) {
+    ipaEl.textContent = w.ipa + (w.audioUrl ? '  ·  🔊 audio de diccionario' : '');
+  } else if (w.ipa === undefined) {
+    // aún no se ha buscado: se llena en segundo plano en renderWordsScreen
+    ipaEl.textContent = '…';
+  }
   const res = row.querySelector('.word-result');
-  row.querySelector('.btn-hear-w').addEventListener('click', () => speakText(w.raw, w.lang));
+  row.querySelector('.btn-hear-w').addEventListener('click', () => {
+    if (w.audioUrl) {
+      new Audio(w.audioUrl).play().catch(() => speakText(w.raw, w.lang));
+    } else {
+      speakText(w.raw, w.lang);
+    }
+  });
   row.querySelector('.btn-try-w').addEventListener('click', async () => {
     res.textContent = '🎤 escuchando… dila ahora';
     let r;
@@ -974,7 +1014,26 @@ async function renderWordsScreen() {
   const list = $('words-list');
   list.innerHTML = '';
   $('words-empty').classList.toggle('hidden', words.length > 0);
-  for (const w of words) list.appendChild(wordRow(w));
+  const rows = new Map();
+  for (const w of words) {
+    const row = wordRow(w);
+    rows.set(w.key, row);
+    list.appendChild(row);
+  }
+  // Busca IPA/audio de diccionario para las palabras en inglés que aún no
+  // lo tienen (en secuencia, máximo 8 por visita, y se guarda en la lista).
+  const pending = words.filter((w) => w.lang === 'en' && w.ipa === undefined).slice(0, 8);
+  for (const w of pending) {
+    const info = await guideEn(w.raw);
+    w.ipa = info.ipa || '';
+    w.audioUrl = info.audioUrl || '';
+    try { await saveWordInfo(w.key, { ipa: w.ipa, audioUrl: w.audioUrl }); } catch {}
+    const row = rows.get(w.key);
+    if (row && row.isConnected) {
+      row.querySelector('.word-ipa').textContent =
+        w.ipa ? w.ipa + (w.audioUrl ? '  ·  🔊 audio de diccionario' : '') : '';
+    }
+  }
 }
 
 // ---------- historial ----------
@@ -1136,5 +1195,5 @@ $('btn-hear').addEventListener('click', hearWord);
 $('btn-try').addEventListener('click', tryWord);
 
 speechWarningDefault = $('speech-warning').textContent;
-$('app-version').textContent = 'v9';
+$('app-version').textContent = 'v10';
 loadNews();
