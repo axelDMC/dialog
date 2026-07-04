@@ -1,5 +1,9 @@
 # 🎙️ Dialog — práctica de expresión oral
 
+**Producción:** [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/axelDMC/dialog)
+El plan gratuito de Render incluye HTTPS (necesario para la cámara). El servicio
+se duerme tras 15 min sin uso; la primera visita después tarda ~1 min en despertar.
+
 App para mejorar tu manera de expresarte: eliges una noticia (o pegas un texto),
 la lees frente a la cámara con teleprompter, y la app analiza tu lectura.
 
